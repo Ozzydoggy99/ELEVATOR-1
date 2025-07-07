@@ -196,17 +196,28 @@ function showShelfPoints(floorName, mapId) {
             
             // Filter and process points
             const uniquePoints = new Set();
+            console.log(`[SHELF-POINTS] Processing ${map.features.length} features for floor ${floorName}`);
+            
             map.features.forEach(feature => {
                 const name = feature.name;
                 if (name && (name.includes('_load') || name.includes('_load_docking'))) {
                     const baseName = name.split('_')[0];
-                    // Only add points that don't start with '0' (not pickup/dropoff points)
-                    if (!baseName.startsWith('0')) {
+                    console.log(`[SHELF-POINTS] Found feature: ${name}, baseName: ${baseName}`);
+                    
+                    // For floor 1, be more inclusive - include points that could be shelf points
+                    // Exclude only the central points (001, 050) and keep everything else
+                    if (baseName !== '001' && baseName !== '050') {
                         uniquePoints.add(baseName);
+                        console.log(`[SHELF-POINTS] Added shelf point: ${baseName}`);
+                    } else {
+                        console.log(`[SHELF-POINTS] Excluded central point: ${baseName}`);
                     }
                 }
             });
-            return Array.from(uniquePoints);
+            
+            const points = Array.from(uniquePoints);
+            console.log(`[SHELF-POINTS] Final shelf points for ${floorName}:`, points);
+            return points;
         });
     })
     .then(points => {

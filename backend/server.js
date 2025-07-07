@@ -319,10 +319,11 @@ const checkAuth = (req, res, next) => {
 
 // Robot configuration
 const robotConfig = {
-    id: 'L382502104987ir',
-    ip: '47.180.91.99',
+    serialNumber: 'L382502104987ir',
+    publicIP: '47.180.91.99',
+    privateIP: '192.168.1.97',
     port: 8090,
-    secret: '667a51a4d948433081a272c78d10a8a4',
+    secretKey: '667a51a4d948433081a272c78d10a8a4',
     name: 'Public Robot',
     type: 'standard'
 };
@@ -473,8 +474,8 @@ app.put('/api/robots/:id', authenticateToken, (req, res) => {
     }
 
     const sql = `UPDATE robots 
-                SET name = ?, publicIP = ?, privateIP = ?, secretKey = ?
-                WHERE id = ?`;
+                SET name = $1, public_ip = $2, private_ip = $3, secret_key = $4
+                WHERE id = $5`;
 
     db.query(sql, [name, publicIP, privateIP, secretKey, id], (err, result) => {
         if (err) {
@@ -895,38 +896,6 @@ async function tryForceMoveOrIgnoreError(robot, moveParams = null) {
         secret: robotConfig.secret
     });
     
-    const endpoints = [
-        '/chassis/ignore_error',
-        '/chassis/force_move',
-        '/chassis/moves/force',
-        '/services/ignore_error',
-        '/services/force_move',
-        '/chassis/override_safety',
-        '/chassis/disable_shelf_shifting',
-        '/chassis/stationary_mode'
-    ];
-    
-    for (const endpoint of endpoints) {
-        try {
-            console.log(`Trying endpoint: ${endpoint}`);
-            const response = await fetch(`${robotConfig.getBaseUrl()}${endpoint}`, {
-                method: 'POST',
-                headers: robotConfig.getHeaders(),
-                body: JSON.stringify(moveParams || { force: true, ignore_errors: true })
-            });
-            
-            if (response.ok) {
-                const data = await response.json();
-                console.log(`✅ Success with ${endpoint}:`, data);
-                return true;
-            } else {
-                console.log(`❌ Failed with ${endpoint}: ${response.status} ${response.statusText}`);
-            }
-        } catch (error) {
-            console.log(`❌ Error with ${endpoint}:`, error.message);
-        }
-    }
-    
     // Try to send a modified move command with force flags
     if (moveParams) {
         try {
@@ -955,6 +924,25 @@ async function tryForceMoveOrIgnoreError(robot, moveParams = null) {
         } catch (error) {
             console.log('❌ Error with force move command:', error.message);
         }
+    }
+    
+    // Try to clear errors via the robot's error clearing endpoint
+    try {
+        console.log('Trying to clear robot errors');
+        const response = await fetch(`${robotConfig.getBaseUrl()}/chassis/clear_errors`, {
+            method: 'POST',
+            headers: robotConfig.getHeaders(),
+            body: JSON.stringify({})
+        });
+        
+        if (response.ok) {
+            console.log('✅ Robot errors cleared successfully');
+            return true;
+        } else {
+            console.log('⚠️ Error clearing endpoint not available');
+        }
+    } catch (error) {
+        console.log('⚠️ Could not clear robot errors:', error.message);
     }
     
     console.log('⚠️ No force/ignore endpoints worked');
@@ -1110,6 +1098,55 @@ async function getRequiredFeaturesForTask(robot, floor, shelfPoint, type, carryi
     const result = { mapName, charger, shelfLoad, shelfLoadDocking };
     console.log(`[FEATURES] Final feature set:`, result);
     return result;
+}
+
+// Helper function to find central load/docking points for any floor
+function findCentralPoints(features, type) {
+    console.log(`[CENTRAL-POINTS] Looking for central points for type: ${type}`);
+    console.log(`[CENTRAL-POINTS] Total features available: ${features.length}`);
+    
+    // Log all feature names for debugging
+    const featureNames = features.map(f => f.name).filter(name => name);
+    console.log(`[CENTRAL-POINTS] All feature names:`, featureNames);
+    
+    // For floor 1, we need to be more flexible about finding central points
+    // Look for any load/docking points that could serve as central points
+    const loadPoints = features.filter(f => f.name && f.name.includes('_load') && !f.name.includes('_load_docking'));
+    const dockingPoints = features.filter(f => f.name && f.name.includes('_load_docking'));
+    
+    console.log(`[CENTRAL-POINTS] Found ${loadPoints.length} load points and ${dockingPoints.length} docking points`);
+    console.log(`[CENTRAL-POINTS] Load points:`, loadPoints.map(f => f.name));
+    console.log(`[CENTRAL-POINTS] Docking points:`, dockingPoints.map(f => f.name));
+    
+    // For pickup, prefer points starting with '050' or any point that seems central
+    // For dropoff, prefer points starting with '001' or any point that seems central
+    let centralLoad = null;
+    let centralLoadDocking = null;
+    
+    if (type === 'pickup') {
+        // Try to find 050 points first
+        centralLoad = loadPoints.find(f => f.name === '050_load') || 
+                     loadPoints.find(f => f.name.startsWith('050_')) ||
+                     loadPoints[0]; // Fallback to first available
+        
+        centralLoadDocking = dockingPoints.find(f => f.name === '050_load_docking') ||
+                            dockingPoints.find(f => f.name.startsWith('050_')) ||
+                            dockingPoints[0]; // Fallback to first available
+    } else {
+        // Try to find 001 points first
+        centralLoad = loadPoints.find(f => f.name === '001_load') || 
+                     loadPoints.find(f => f.name.startsWith('001_')) ||
+                     loadPoints[0]; // Fallback to first available
+        
+        centralLoadDocking = dockingPoints.find(f => f.name === '001_load_docking') ||
+                            dockingPoints.find(f => f.name.startsWith('001_')) ||
+                            dockingPoints[0]; // Fallback to first available
+    }
+    
+    console.log(`[CENTRAL-POINTS] Selected central load: ${centralLoad?.name}`);
+    console.log(`[CENTRAL-POINTS] Selected central docking: ${centralLoadDocking?.name}`);
+    
+    return { centralLoad, centralLoadDocking };
 }
 
 // Extract workflow execution into a separate function that can be called by the queue manager
@@ -1619,17 +1656,15 @@ app.post('/api/templates/:id/tasks', authenticateToken, async (req, res) => {
         return feature;
     }
 
-    // Get all required points
-    const centralBase = type === 'pickup' ? '050' : '001';
-    const centralLoad = getFeatureInfo(`${centralBase}_load`);
-    const centralLoadDocking = getFeatureInfo(`${centralBase}_load_docking`);
+    // Get all required points using the flexible helper
+    const { centralLoad, centralLoadDocking } = findCentralPoints(features, type);
     const shelfLoad = getFeatureInfo(`${shelfPoint}_load`);
     const shelfLoadDocking = getFeatureInfo(`${shelfPoint}_load_docking`);
     const charger = getFeatureInfo('Charging Station_docking') || getFeatureInfo('Charging Station');
 
     // Debug: Log which required features are missing
-    if (!centralLoad) console.error('Missing feature:', `${centralBase}_load`);
-    if (!centralLoadDocking) console.error('Missing feature:', `${centralBase}_load_docking`);
+    if (!centralLoad) console.error('Missing central load point');
+    if (!centralLoadDocking) console.error('Missing central load docking point');
     if (!shelfLoad) console.error('Missing feature:', `${shelfPoint}_load`);
     if (!shelfLoadDocking) console.error('Missing feature:', `${shelfPoint}_load_docking`);
     if (!charger) console.error('Missing feature: charger');
@@ -1647,7 +1682,8 @@ app.post('/api/templates/:id/tasks', authenticateToken, async (req, res) => {
                 shelfLoad: !shelfLoad,
                 shelfLoadDocking: !shelfLoadDocking,
                 charger: !charger
-            }
+            },
+            availableFeatures: features.map(f => f.name).filter(name => name && (name.includes('_load') || name.includes('Charging')))
         });
     }
 
@@ -1768,17 +1804,15 @@ app.post('/api/templates/:id/queue-task', authenticateToken, async (req, res) =>
         return feature;
     }
 
-    // Get all required points
-    const centralBase = type === 'pickup' ? '050' : '001';
-    const centralLoad = getFeatureInfo(`${centralBase}_load`);
-    const centralLoadDocking = getFeatureInfo(`${centralBase}_load_docking`);
+    // Get all required points using the flexible helper
+    const { centralLoad, centralLoadDocking } = findCentralPoints(features, type);
     const shelfLoad = getFeatureInfo(`${shelfPoint}_load`);
     const shelfLoadDocking = getFeatureInfo(`${shelfPoint}_load_docking`);
     const charger = getFeatureInfo('Charging Station_docking') || getFeatureInfo('Charging Station');
 
     // Debug: Log which required features are missing
-    if (!centralLoad) console.error('Missing feature:', `${centralBase}_load`);
-    if (!centralLoadDocking) console.error('Missing feature:', `${centralBase}_load_docking`);
+    if (!centralLoad) console.error('Missing central load point');
+    if (!centralLoadDocking) console.error('Missing central load docking point');
     if (!shelfLoad) console.error('Missing feature:', `${shelfPoint}_load`);
     if (!shelfLoadDocking) console.error('Missing feature:', `${shelfPoint}_load_docking`);
     if (!charger) console.error('Missing feature: charger');
@@ -1796,7 +1830,8 @@ app.post('/api/templates/:id/queue-task', authenticateToken, async (req, res) =>
                 shelfLoad: !shelfLoad,
                 shelfLoadDocking: !shelfLoadDocking,
                 charger: !charger
-            }
+            },
+            availableFeatures: features.map(f => f.name).filter(name => name && (name.includes('_load') || name.includes('Charging')))
         });
     }
 

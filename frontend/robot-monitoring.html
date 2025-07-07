@@ -34,9 +34,56 @@
             </header>
             <div class="dashboard-content">
                 <div id="monitoringCards" class="card-grid"></div>
+                <div id="taskQueue">
+                    <!-- ... existing task queue code ... -->
+                </div>
+
+                <!-- Interactive Map Display Section -->
+                <div id="map" style="width:100%;height:500px; margin-top: 20px;"></div>
             </div>
         </main>
     </div>
     <script src="robot-monitoring.js"></script>
+    <script type="module">
+    // Import the SDK if using a bundler or module system
+    // import { AXRobot, AppMode } from "@autoxing/robot-js-sdk";
+    // If using CDN, ensure the SDK is loaded globally as AXRobot and AppMode
+
+    const appId = "<yourAppId>";
+    const appSecret = "<yourAppSecret>";
+    const areaId = "<areaId>"; // Replace with your areaId
+    const wsUrl = "ws://<YOUR_BACKEND_WS_URL>"; // Replace with your backend WebSocket URL
+
+    let axMap = null;
+
+    async function setupMap() {
+        // If using CDN, use window.AXRobot and window.AppMode
+        const AXRobotClass = window.AXRobot || (await import("@autoxing/robot-js-sdk")).AXRobot;
+        const AppModeEnum = window.AppMode || (await import("@autoxing/robot-js-sdk")).AppMode;
+        const axRobot = new AXRobotClass(appId, appSecret, AppModeEnum.WAN_APP);
+        const success = await axRobot.init();
+        if (success) {
+            axMap = axRobot.createMap("map"); // "map" is the id of the HTML container
+            axMap.setAreaMap(areaId);
+        } else {
+            console.error("Failed to initialize AXRobot SDK");
+        }
+    }
+
+    setupMap();
+
+    // --- Live Update Example (WebSocket) ---
+    const ws = new WebSocket(wsUrl);
+    ws.onmessage = function(event) {
+        const data = JSON.parse(event.data);
+        // Example: { type: 'map_update', areaId: '...', ... }
+        if (data.type === 'map_update' && axMap) {
+            if (data.areaId && data.areaId !== areaId) {
+                axMap.setAreaMap(data.areaId);
+            }
+            // Optionally update overlays, robot position, etc. here
+        }
+    };
+    </script>
 </body>
 </html> 

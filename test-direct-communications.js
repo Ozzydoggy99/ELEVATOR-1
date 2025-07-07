@@ -14,7 +14,7 @@ class ESPNowCommunicationTester extends EventEmitter {
                 connected: false,
                 commandsSent: 0,
                 responsesReceived: 0,
-                responseTimes: [],
+            responseTimes: [],
                 macAddress: null
             },
             secondaryRelay: {
@@ -65,7 +65,7 @@ class ESPNowCommunicationTester extends EventEmitter {
         console.log('Connecting to relay serial ports...');
         
         try {
-            // Connect to primary relay
+    // Connect to primary relay
             this.primaryPort = new SerialPort.SerialPort({
                 path: this.primaryConfig.serialPort,
                 baudRate: 115200,
@@ -382,7 +382,7 @@ class ESPNowCommunicationTester extends EventEmitter {
             await this.testESPNowCommunication();
             
             // Test 2: Elevator commands
-            await this.testElevatorCommands();
+                await this.testElevatorCommands();
             
             // Test 3: Communication reliability
             await this.testCommunicationReliability();
@@ -438,4 +438,4 @@ module.exports = ESPNowCommunicationTester;
 // Run if called directly
 if (require.main === module) {
     main().catch(console.error);
-} 
+}

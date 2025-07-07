@@ -40,6 +40,7 @@ async function loadRobots() {
 
 // Display robots in the grid
 function displayRobots(robots) {
+    console.log('Robots loaded:', robots);
     const grid = document.getElementById('robotGrid');
     const template = document.getElementById('robotCardTemplate');
     
@@ -70,14 +71,24 @@ function displayRobots(robots) {
             icon.classList.toggle('fa-chevron-up');
         });
         
-        saveBtn.addEventListener('click', async () => {
+        saveBtn.addEventListener('click', async function() {
+            // Use closest to get the correct card element
+            const cardElement = this.closest('.robot-card');
+            const publicIpInput = cardElement.querySelector('.public-ip');
+            const privateIpInput = cardElement.querySelector('.private-ip');
+            const secretKeyInput = cardElement.querySelector('.secret-key');
+            if (!publicIpInput || !privateIpInput || !secretKeyInput) {
+                console.error('One or more input fields are missing in the robot card template.', {
+                    publicIpInput, privateIpInput, secretKeyInput, robot
+                });
+                alert('Error: One or more input fields are missing. Please contact support.');
+                return;
+            }
             const updatedRobot = {
-                id: robot.id,
                 name: robot.name,
-                serial_number: robot.serial_number,
-                public_ip: card.querySelector('.public-ip').value,
-                private_ip: card.querySelector('.private-ip').value,
-                secret_key: card.querySelector('.secret-key').value
+                publicIP: publicIpInput.value,
+                privateIP: privateIpInput.value,
+                secretKey: secretKeyInput.value
             };
             
             try {
