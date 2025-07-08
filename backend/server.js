@@ -63,11 +63,16 @@ app.post('/api/templates', authenticateToken, async (req, res) => {
     }
 
     try {
-        // Find the robot by id
-        const robotResult = await db.query('SELECT * FROM robots WHERE id = $1', [robotId]);
+        // Convert robotId to integer and find the robot by id
+        const robotIdInt = parseInt(robotId, 10);
+        if (isNaN(robotIdInt)) {
+            return res.status(400).json({ error: 'Invalid robot ID' });
+        }
+        
+        const robotResult = await db.query('SELECT * FROM robots WHERE id = $1', [robotIdInt]);
         if (robotResult.rows.length === 0) {
-        return res.status(404).json({ error: 'Robot not found' });
-    }
+            return res.status(404).json({ error: 'Robot not found' });
+        }
         const robot = robotResult.rows[0];
 
         // Insert the template
@@ -86,6 +91,7 @@ app.post('/api/templates', authenticateToken, async (req, res) => {
         res.status(201).json(result.rows[0]);
     } catch (err) {
         console.error('Error creating template:', err);
+        console.error('Request body:', req.body);
         res.status(500).json({ error: 'Failed to create template' });
     }
 });
@@ -796,22 +802,35 @@ async function sendMoveTask(robot, params) {
         body: JSON.stringify(moveParams)
     });
 
+    // Get response text for detailed error analysis
+    const responseText = await response.text();
+    let responseData;
+    
+    try {
+        responseData = JSON.parse(responseText);
+    } catch (e) {
+        console.log('Response is not JSON:', responseText);
+        responseData = { raw_response: responseText };
+    }
+
     if (!response.ok) {
         console.error('Move Task Failed:', {
             status: response.status,
             statusText: response.statusText,
-            url: response.url
+            url: response.url,
+            response: responseData
         });
-        throw new Error(`Failed to send move command: ${response.status} ${response.statusText}`);
+        throw new Error(`Failed to send move command: ${response.status} ${response.statusText} - ${JSON.stringify(responseData)}`);
     }
 
-    const data = await response.json();
-    console.log('Move Task Response:', data);
-    return data.id || data.action_id || data.task_id;
+    console.log('Move Task Response:', responseData);
+    return responseData.id || responseData.action_id || responseData.task_id;
 }
 
-async function sendJack(robot, service) {
+async function sendJack(robot, service, taskId = null) {
     const robotConfig = new RobotConfig(robot);
+    const startTime = new Date();
+    
     console.log('=== Jack Operation Fetch Details ===');
     console.log('Robot Config:', {
         serialNumber: robotConfig.serialNumber,
@@ -822,23 +841,118 @@ async function sendJack(robot, service) {
     console.log('URL:', `${robotConfig.getBaseUrl()}/services/${service}`);
     console.log('Headers:', robotConfig.getHeaders());
 
-    const response = await fetch(`${robotConfig.getBaseUrl()}/services/${service}`, {
-        method: 'POST',
-        headers: robotConfig.getHeaders(),
-        body: JSON.stringify({})
-    });
+    const errorDetails = {
+        operation: 'jack',
+        service: service,
+        robot_serial: robotConfig.serialNumber,
+        robot_ip: robotConfig.publicIp,
+        start_time: startTime.toISOString(),
+        request: {
+            url: `${robotConfig.getBaseUrl()}/services/${service}`,
+            method: 'POST',
+            headers: robotConfig.getHeaders(),
+            body: {}
+        }
+    };
 
-    if (!response.ok) {
-        console.error('Jack Operation Failed:', {
+    try {
+        const response = await fetch(`${robotConfig.getBaseUrl()}/services/${service}`, {
+            method: 'POST',
+            headers: robotConfig.getHeaders(),
+            body: JSON.stringify({})
+        });
+
+        const endTime = new Date();
+        const responseTime = endTime.getTime() - startTime.getTime();
+
+        // Get response text for detailed error analysis
+        const responseText = await response.text();
+        let responseData;
+        
+        try {
+            responseData = JSON.parse(responseText);
+        } catch (e) {
+            console.log('Response is not JSON:', responseText);
+            responseData = { raw_response: responseText };
+        }
+
+        // Add response details to error tracking
+        errorDetails.response = {
             status: response.status,
             statusText: response.statusText,
-            url: response.url
-        });
-        throw new Error(`Failed to send jack command: ${response.status} ${response.statusText}`);
-    }
+            responseTime: responseTime,
+            headers: Object.fromEntries(response.headers.entries()),
+            data: responseData,
+            text: responseText
+        };
 
-    console.log('Jack Operation Response:', await response.json());
-    await new Promise(resolve => setTimeout(resolve, 10000));
+        if (!response.ok) {
+            console.error('Jack Operation Failed:', {
+                status: response.status,
+                statusText: response.statusText,
+                url: response.url,
+                response: responseData,
+                responseTime: responseTime
+            });
+            
+            // Store detailed error information if we have a task ID
+            if (taskId) {
+                try {
+                    await db.query(
+                        `UPDATE task_queue SET detailed_error = $2 WHERE id = $1`,
+                        [taskId, JSON.stringify(errorDetails)]
+                    );
+                } catch (dbError) {
+                    console.error('Failed to store detailed error:', dbError);
+                }
+            }
+            
+            throw new Error(`Failed to send jack command: ${response.status} ${response.statusText} - ${JSON.stringify(responseData)}`);
+        }
+
+        console.log('Jack Operation Response:', responseData);
+        
+        // Store successful operation details if we have a task ID
+        if (taskId) {
+            try {
+                await db.query(
+                    `UPDATE task_queue SET detailed_error = $2 WHERE id = $1`,
+                    [taskId, JSON.stringify({
+                        ...errorDetails,
+                        success: true,
+                        end_time: endTime.toISOString()
+                    })]
+                );
+            } catch (dbError) {
+                console.error('Failed to store successful operation details:', dbError);
+            }
+        }
+        
+        await new Promise(resolve => setTimeout(resolve, 10000));
+    } catch (error) {
+        const endTime = new Date();
+        errorDetails.error = {
+            message: error.message,
+            stack: error.stack,
+            end_time: endTime.toISOString()
+        };
+        
+        console.error('Error in sendJack:', error);
+        
+        // Store detailed error information if we have a task ID
+        if (taskId) {
+            try {
+                await db.query(
+                    `UPDATE task_queue SET detailed_error = $2 WHERE id = $1`,
+                    [taskId, JSON.stringify(errorDetails)]
+                );
+            } catch (dbError) {
+                console.error('Failed to store detailed error:', dbError);
+            }
+        }
+        
+        throw error;
+    }
 }
 
 // Function to clear robot errors (for stationary workflows)
@@ -965,17 +1079,40 @@ async function checkMoveStatus(robot, moveId) {
         const response = await fetch(`${robotConfig.getBaseUrl()}/chassis/moves/${moveId}`, {
             headers: robotConfig.getHeaders()
         });
+        
+        // Get response text for detailed error analysis
+        const responseText = await response.text();
+        let responseData;
+        
+        try {
+            responseData = JSON.parse(responseText);
+        } catch (e) {
+            console.log('Response is not JSON:', responseText);
+            responseData = { raw_response: responseText };
+        }
+        
         if (!response.ok) {
             console.error('Move Status Check Failed:', {
                 status: response.status,
                 statusText: response.statusText,
-                url: response.url
+                url: response.url,
+                response: responseData
             });
-            throw new Error(`Failed to check move status: ${response.status} ${response.statusText}`);
+            throw new Error(`Failed to check move status: ${response.status} ${response.statusText} - ${JSON.stringify(responseData)}`);
         }
-        const data = await response.json();
-        console.log('Move Status Response:', data);
-        return data.state || 'unknown';
+        
+        console.log('Move Status Response:', responseData);
+        
+        // Check for detailed error information in the response
+        if (responseData.state === 'failed' && responseData.error) {
+            console.error('Move failed with detailed error:', responseData.error);
+        }
+        
+        if (responseData.state === 'failed' && responseData.message) {
+            console.error('Move failed with message:', responseData.message);
+        }
+        
+        return responseData.state || 'unknown';
     } catch (error) {
         console.error('Error checking move status:', error);
         return 'failed';
@@ -995,6 +1132,37 @@ async function waitForMoveComplete(robot, moveId, timeout = 600000, isStationary
             isMoving = false;
             console.log('✅ Move completed successfully');
         } else if (status === 'failed' || status === 'cancelled') {
+            // Get detailed error information
+            let detailedError = `Move failed with status: ${status}`;
+            
+            try {
+                const robotConfig = new RobotConfig(robot);
+                const response = await fetch(`${robotConfig.getBaseUrl()}/chassis/moves/${moveId}`, {
+                    headers: robotConfig.getHeaders()
+                });
+                const responseText = await response.text();
+                let responseData;
+                
+                try {
+                    responseData = JSON.parse(responseText);
+                    if (responseData.error) {
+                        detailedError += ` - Error: ${JSON.stringify(responseData.error)}`;
+                    }
+                    if (responseData.message) {
+                        detailedError += ` - Message: ${responseData.message}`;
+                    }
+                    if (responseData.details) {
+                        detailedError += ` - Details: ${JSON.stringify(responseData.details)}`;
+                    }
+                } catch (e) {
+                    detailedError += ` - Raw response: ${responseText}`;
+                }
+            } catch (e) {
+                console.log('Could not get detailed error info:', e.message);
+            }
+            
+            console.error('Move failed with detailed error:', detailedError);
+            
             // For stationary workflows, try to force the move before giving up
             if (isStationary) {
                 console.log('⚠️ Move failed, attempting to force/ignore error for stationary workflow...');
@@ -1005,7 +1173,7 @@ async function waitForMoveComplete(robot, moveId, timeout = 600000, isStationary
                     return; // Continue as if move succeeded
                 }
             }
-            throw new Error(`Move failed with status: ${status}`);
+            throw new Error(detailedError);
         } else {
             await new Promise(resolve => setTimeout(resolve, 1000));
         }
@@ -1150,7 +1318,7 @@ function findCentralPoints(features, type) {
 }
 
 // Extract workflow execution into a separate function that can be called by the queue manager
-async function executeWorkflow(robot, type, centralLoad, centralLoadDocking, shelfLoad, shelfLoadDocking, charger, options = {}) {
+async function executeWorkflow(robot, type, centralLoad, centralLoadDocking, shelfLoad, shelfLoadDocking, charger, options = {}, taskId = null) {
     if (type === 'dropoff') {
         // 1. Move to central_load_docking
         const move1 = {
@@ -1180,7 +1348,7 @@ async function executeWorkflow(robot, type, centralLoad, centralLoadDocking, she
         await new Promise(resolve => setTimeout(resolve, 2000));
 
         // 3. Jack up
-        await sendJack(robot, 'jack_up');
+        await sendJack(robot, 'jack_up', taskId);
         await new Promise(resolve => setTimeout(resolve, 10000));
         await new Promise(resolve => setTimeout(resolve, 2000));
 
@@ -1211,7 +1379,7 @@ async function executeWorkflow(robot, type, centralLoad, centralLoadDocking, she
         await waitForMoveComplete(robot, move3Id);
 
         // 6. Jack down
-        await sendJack(robot, 'jack_down');
+        await sendJack(robot, 'jack_down', taskId);
         await new Promise(resolve => setTimeout(resolve, 10000));
 
         // 7. Return to charger
@@ -1257,7 +1425,7 @@ async function executeWorkflow(robot, type, centralLoad, centralLoadDocking, she
         await new Promise(resolve => setTimeout(resolve, 2000));
 
         // 3. Jack up
-        await sendJack(robot, 'jack_up');
+        await sendJack(robot, 'jack_up', taskId);
         await new Promise(resolve => setTimeout(resolve, 10000));
         await new Promise(resolve => setTimeout(resolve, 2000));
 
@@ -1288,7 +1456,7 @@ async function executeWorkflow(robot, type, centralLoad, centralLoadDocking, she
         await waitForMoveComplete(robot, move3Id);
 
         // 6. Jack down
-        await sendJack(robot, 'jack_down');
+        await sendJack(robot, 'jack_down', taskId);
         await new Promise(resolve => setTimeout(resolve, 10000));
 
         // 7. Return to charger
@@ -1937,7 +2105,8 @@ setInterval(async () => {
                     enrichedData.shelfLoad,
                     enrichedData.shelfLoadDocking,
                     enrichedData.charger,
-                    enrichedData.options
+                    enrichedData.options,
+                    task.id
                 );
                 }
                 await db.query(

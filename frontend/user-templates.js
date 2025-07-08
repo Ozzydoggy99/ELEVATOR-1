@@ -164,6 +164,21 @@ document.getElementById('createTemplateForm').addEventListener('submit', async (
         stationary: formData.get('stationary') === 'on'
     };
 
+    // Validate required fields
+    if (!templateData.name || !templateData.color || !templateData.robotId || 
+        !templateData.bossUser.username || !templateData.bossUser.password) {
+        alert('Please fill in all required fields');
+        return;
+    }
+
+    console.log('Sending template data:', templateData);
+
+    // Disable submit button to prevent multiple submissions
+    const submitBtn = e.target.querySelector('button[type="submit"]');
+    const originalText = submitBtn.textContent;
+    submitBtn.disabled = true;
+    submitBtn.textContent = 'Creating...';
+
     try {
         const response = await fetch('/api/templates', {
             method: 'POST',
@@ -180,12 +195,17 @@ document.getElementById('createTemplateForm').addEventListener('submit', async (
             document.getElementById('createTemplateForm').reset();
             loadTemplates();
         } else {
-            const error = await response.json();
-            alert(error.error || 'Failed to create template');
+            const errorData = await response.json();
+            console.error('Server error:', errorData);
+            alert(errorData.error || 'Failed to create template. Please check all required fields.');
         }
     } catch (error) {
         console.error('Error creating template:', error);
-        alert('Error creating template');
+        alert('Network error: Unable to connect to server. Please check your connection and try again.');
+    } finally {
+        // Re-enable submit button
+        submitBtn.disabled = false;
+        submitBtn.textContent = originalText;
     }
 });
 
